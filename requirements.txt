@@ -1,0 +1,53 @@
+# 智能文档和图片清理器 - 依赖包列表
+# Smart Document Cleaner - Requirements
+
+# YAML配置文件支持
+# YAML configuration file support
+PyYAML>=6.0
+
+# 进度条显示
+# Progress bar display
+tqdm>=4.64.0
+
+# 文件类型检测
+# File type detection
+python-magic>=0.4.27
+
+# 日志记录增强
+# Enhanced logging
+coloredlogs>=15.0
+
+# 配置文件验证
+# Configuration validation
+jsonschema>=4.17.0
+
+# 文件哈希计算（用于重复文件检测）
+# File hash calculation (for duplicate file detection)
+hashlib-compat>=1.0.1
+
+# 多线程处理增强
+# Enhanced multi-threading
+concurrent-futures>=3.1.1
+
+# 文件系统监控（可选）
+# File system monitoring (optional)
+watchdog>=2.1.9
+
+# 内存使用监控
+# Memory usage monitoring
+psutil>=5.9.0
+
+# 命令行参数解析增强
+# Enhanced command line argument parsing
+click>=8.1.0
+
+# 文件大小格式化
+# File size formatting
+humanize>=4.4.0
+
+# 开发依赖（仅开发环境需要）
+# Development dependencies (development environment only)
+# pytest>=7.2.0
+# black>=22.10.0
+# flake8>=5.0.4
+# mypy>=0.991
