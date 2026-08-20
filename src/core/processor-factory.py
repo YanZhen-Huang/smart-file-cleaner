@@ -8,10 +8,12 @@
 
 import os
 import sys
+import shutil
 from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Dict, Type, Optional, Any, List, Tuple
 from enum import Enum
+from datetime import datetime
 
 # 设置项目路径
 current_file = Path(__file__)
@@ -105,8 +107,17 @@ class BaseProcessor(ABC):
             Tuple[bool, str]: (是否成功处理, 处理结果描述)
         """
         try:
-            # 获取文件信息
-            file_info = file_utils.get_file_info(file_path)
+            # 获取文件信息（file_utils 无 get_file_info，直接构建）
+            try:
+                stat_info = os.stat(file_path)
+                file_info = {
+                    'size': stat_info.st_size,
+                    'modified_time': datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                    'name': Path(file_path).name,
+                    'extension': file_utils.get_file_extension(file_path)
+                }
+            except (OSError, IOError):
+                file_info = {'size': 0, 'modified_time': '', 'name': '', 'extension': ''}
             
             # 使用策略模式判断是否应该删除文件
             should_delete, reason, priority = self.should_delete_file(file_path, file_info)
@@ -126,6 +137,40 @@ class BaseProcessor(ABC):
                 
         except Exception as e:
             return False, f"处理文件时出错: {e}"
+    
+    def scan_directory(self, directory: str) -> List[Dict[str, Any]]:
+        """
+        扫描目录中的文件，返回文件信息列表
+        
+        Args:
+            directory (str): 目标目录路径
+            
+        Returns:
+            List[Dict[str, Any]]: 文件信息列表，每项包含 path 和 info 字段
+        """
+        results = []
+        try:
+            for root, dirs, files in os.walk(directory):
+                # 跳过隐藏目录和系统目录
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'node_modules', '.git'}]
+                
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        stat_info = os.stat(file_path)
+                        info = {
+                            'size': stat_info.st_size,
+                            'modified_time': datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                            'name': file,
+                            'extension': file_utils.get_file_extension(file_path)
+                        }
+                        results.append({'path': file_path, 'info': info})
+                    except (OSError, IOError):
+                        continue
+        except Exception as e:
+            print(f"扫描目录时出错: {e}")
+            return []
+        return results
     
     def should_delete_file(self, file_path: str, file_info: Dict[str, Any]) -> Tuple[bool, str, int]:
         """
@@ -147,7 +192,12 @@ class BaseProcessor(ABC):
     
     def _delete_file(self, file_path: str) -> bool:
         """
-        删除文件
+        删除文件（默认先进回收站，可先备份）
+        
+        安全策略:
+        1. 若开启备份，先复制到备份目录
+        2. Windows 下默认移入回收站（可恢复），而非永久删除
+        3. 回收站不可用时退回永久删除
         
         Args:
             file_path (str): 文件路径
@@ -161,13 +211,59 @@ class BaseProcessor(ABC):
             if dry_run:
                 print(f"[模拟] 删除文件: {file_path}")
                 return True
-            else:
-                os.remove(file_path)
-                print(f"已删除文件: {file_path}")
-                return True
+            
+            # 先备份（可选）
+            create_backup = self.config.get('create_backup', False)
+            if create_backup:
+                backup_dir = Path(self.config.get('backup_dir', 'backups'))
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_path = backup_dir / Path(file_path).name
+                shutil.copy2(file_path, backup_path)
+                print(f"已备份: {backup_path}")
+            
+            # 回收站删除（Windows 默认开启）
+            use_recycle_bin = self.config.get('use_recycle_bin', True)
+            if use_recycle_bin and os.name == 'nt':
+                try:
+                    if self._send_to_recycle_bin(file_path):
+                        print(f"已移入回收站: {file_path}")
+                        return True
+                    print(f"回收站删除失败，退回永久删除: {file_path}")
+                except Exception as e:
+                    print(f"回收站删除异常，退回永久删除: {e}")
+            
+            os.remove(file_path)
+            print(f"已删除文件: {file_path}")
+            return True
         except Exception as e:
             print(f"删除文件失败 {file_path}: {e}")
             return False
+    
+    @staticmethod
+    def _send_to_recycle_bin(file_path: str) -> bool:
+        """
+        将文件移入 Windows 回收站（可恢复）
+        
+        通过 PowerShell 调用 Microsoft.VisualBasic 的 FileSystem API，
+        与资源管理器删除行为一致。
+        
+        Args:
+            file_path (str): 文件路径
+            
+        Returns:
+            bool: 是否成功移入回收站
+        """
+        import subprocess
+        ps_script = (
+            "Add-Type -AssemblyName Microsoft.VisualBasic; "
+            "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+            f"'{file_path}', 'OnlyErrorDialogs', 'SendToRecycleBin')"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=30
+        )
+        return result.returncode == 0
     
     def get_stats(self) -> Dict[str, Any]:
         """

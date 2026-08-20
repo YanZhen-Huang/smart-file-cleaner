@@ -409,6 +409,138 @@ class FileProcessorController:
         
         print("\n🔚 程序结束")
     
+    def run_interactive_mode(self):
+        """
+        运行交互式模式（main.py 入口兼容别名）
+        
+        Returns:
+            int: 退出码
+        """
+        self.interactive_mode()
+        return 0
+    
+    def run_auto_mode(self) -> int:
+        """
+        无人值守自动清理模式（供定时任务调用）
+        
+        按 operation-config.json 配置执行：先预览，再实际清理。
+        若 require_confirmation 为 false 则跳过预览直接执行。
+        
+        Returns:
+            int: 0 成功 / 1 失败
+        """
+        print("🤖 自动清理模式（无人值守）")
+        
+        # 加载配置文件
+        self._load_operation_config()
+        if not hasattr(self, 'operation_config') or not self.operation_config:
+            print("❌ 配置加载失败")
+            return 1
+        
+        config = self.operation_config.get('processing_config', {})
+        safety = config.get('safety_settings', {})
+        
+        target_dirs = config.get('target_directories', [])
+        if not target_dirs:
+            print("❌ 未配置目标目录")
+            return 1
+        
+        try:
+            # 创建处理器
+            processor_type = config.get('processor_type', 'smart_document')
+            if not self._create_processor_if_needed(processor_type, config):
+                print(f"❌ 无法创建处理器: {processor_type}")
+                return 1
+            
+            all_ok = True
+            results = []
+            for target_dir in target_dirs:
+                if not Path(target_dir).exists():
+                    print(f"❌ 目录不存在: {target_dir}")
+                    all_ok = False
+                    continue
+                
+                print(f"\n🔄 目录: {target_dir}")
+                # 先预览
+                self._process_directory(target_dir, dry_run=True)
+                # 直接执行（无人值守，不再询问）
+                print("🚀 执行实际清理...")
+                if not self._process_directory(target_dir, dry_run=False):
+                    all_ok = False
+            
+            # 保存清理报告
+            self._save_auto_report()
+            
+            return 0 if all_ok else 1
+            
+        except Exception as e:
+            print(f"❌ 自动清理失败: {e}")
+            return 1
+    
+    def run_preview_mode(self) -> int:
+        """
+        预览模式（只扫描标记，不删除），供 GUI 预览使用
+        
+        Returns:
+            int: 0 成功 / 1 失败
+        """
+        print("🔍 预览模式（不删除任何文件）")
+        
+        self._load_operation_config()
+        if not hasattr(self, 'operation_config') or not self.operation_config:
+            print("❌ 配置加载失败")
+            return 1
+        
+        config = self.operation_config.get('processing_config', {})
+        target_dirs = config.get('target_directories', [])
+        if not target_dirs:
+            print("❌ 未配置目标目录")
+            return 1
+        
+        try:
+            processor_type = config.get('processor_type', 'smart_document')
+            if not self._create_processor_if_needed(processor_type, config):
+                print(f"❌ 无法创建处理器: {processor_type}")
+                return 1
+            
+            for target_dir in target_dirs:
+                if not Path(target_dir).exists():
+                    print(f"❌ 目录不存在: {target_dir}")
+                    continue
+                print(f"\n🔄 目录: {target_dir}")
+                self._process_directory(target_dir, dry_run=True)
+            
+            return 0
+            
+        except Exception as e:
+            print(f"❌ 预览失败: {e}")
+            return 1
+    
+    def _save_auto_report(self):
+        """把最近一次实际执行结果保存为 JSON 报告到 reports 目录"""
+        try:
+            # 只收集"实际执行"（dry_run=False）的结果
+            executed = [r for r in self.processing_results if not r.get('dry_run', True) and r.get('success', False)]
+            if not executed:
+                print("ℹ️ 无实际执行结果，跳过报告生成")
+                return
+            
+            report_dir = Path(self.operation_config.get('report_settings', {}).get('output_dir', 'reports'))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_path = report_dir / f'cleaning_report_{timestamp}.json'
+            
+            report_data = {
+                'timestamp': datetime.now().isoformat(),
+                'directories': executed,
+            }
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report_data, f, ensure_ascii=False, indent=2, default=str)
+            
+            print(f"📄 清理报告已保存: {report_path}")
+        except Exception as e:
+            print(f"❌ 保存报告失败: {e}")
+    
     def _show_simple_welcome(self):
         """
         显示简化的欢迎信息
@@ -444,7 +576,11 @@ class FileProcessorController:
         加载操作配置文件
         """
         try:
-            config_path = Path(__file__).parent.parent / 'config' / 'operation-config.json'
+            if getattr(sys, 'frozen', False):
+                # 打包环境：配置在 exe 旁边 config 目录
+                config_path = Path(sys.executable).parent / 'config' / 'operation-config.json'
+            else:
+                config_path = Path(__file__).parent.parent / 'config' / 'operation-config.json'
             if config_path.exists():
                 with open(config_path, 'r', encoding='utf-8') as f:
                     self.operation_config = json.loads(f.read())
@@ -454,10 +590,15 @@ class FileProcessorController:
                 self.operation_config = {
                     "processing_config": {
                         "processor_type": "smart_document",
-                        "cleaning_strategy": "document",
+                        "cleaning_strategy": "age",
                         "target_directories": ["./"],
+                        "max_age_days": 30,
+                        "use_filename_date": True,
+                        "target_extensions": [],
                         "safety_settings": {
                             "create_backup": True,
+                            "backup_dir": "backups",
+                            "use_recycle_bin": True,
                             "require_confirmation": True
                         }
                     }
@@ -528,8 +669,11 @@ class FileProcessorController:
         # 显示即将执行的操作
         print("\n📋 即将执行的操作:")
         print(f"  • 处理器: {config.get('processor_type', 'smart_document')}")
-        print(f"  • 策略: {config.get('cleaning_strategy', 'document')}")
+        print(f"  • 策略: {config.get('cleaning_strategy', 'age')}")
         print(f"  • 目录: {', '.join(config.get('target_directories', ['./']))}")
+        print(f"  • 过期天数: {config.get('max_age_days', 30)} 天")
+        print(f"  • 文件名日期: {'是' if config.get('use_filename_date', True) else '否'}")
+        print(f"  • 回收站: {'是' if safety.get('use_recycle_bin', True) else '否'}")
         print(f"  • 备份: {'是' if safety.get('create_backup', True) else '否'}")
         
         # 安全确认
@@ -542,14 +686,8 @@ class FileProcessorController:
         try:
             # 创建处理器
             processor_type = config.get('processor_type', 'smart_document')
-            if not self._create_processor_if_needed(processor_type):
+            if not self._create_processor_if_needed(processor_type, config):
                 print(f"❌ 无法创建处理器: {processor_type}")
-                return
-            
-            # 设置策略
-            strategy = config.get('cleaning_strategy', 'document')
-            if not self._set_strategy_if_needed(strategy):
-                print(f"❌ 无法设置策略: {strategy}")
                 return
             
             # 执行处理
@@ -559,16 +697,15 @@ class FileProcessorController:
                     print(f"\n🔄 处理目录: {target_dir}")
                     # 先预览模式
                     print("📋 预览模式 - 扫描文件...")
-                    success = self._process_directory(target_dir, dry_run=True)
+                    self._process_directory(target_dir, dry_run=True)
                     
-                    if success:
-                        # 询问是否实际执行
-                        execute = input("\n🎯 是否执行实际清理? (y/N): ").strip().lower()
-                        if execute in ['y', 'yes', '是']:
-                            print("🚀 执行实际清理...")
-                            self._process_directory(target_dir, dry_run=False)
-                        else:
-                            print("💡 仅完成预览，未执行实际清理")
+                    # 询问是否实际执行
+                    execute = input("\n🎯 是否执行实际清理? (y/N): ").strip().lower()
+                    if execute in ['y', 'yes', '是']:
+                        print("🚀 执行实际清理...")
+                        self._process_directory(target_dir, dry_run=False)
+                    else:
+                        print("💡 仅完成预览，未执行实际清理")
                 else:
                     print(f"❌ 目录不存在: {target_dir}")
             
@@ -581,9 +718,13 @@ class FileProcessorController:
             print(f"❌ 执行操作失败: {e}")
 
 
-    def _create_processor_if_needed(self, processor_type):
+    def _create_processor_if_needed(self, processor_type, config=None):
         """
         根据需要创建处理器
+        
+        Args:
+            processor_type (str): 处理器类型
+            config (Dict, optional): 处理配置（含过期天数、回收站等）
         """
         try:
             if not self.current_processor or getattr(self, 'current_processor_type', None) != processor_type:
@@ -597,8 +738,32 @@ class FileProcessorController:
                 }
                 
                 mapped_type = processor_type_map.get(processor_type, ProcessorType.SMART_CLEANER)
-                self.current_processor = self.factory.create_processor(mapped_type)
+                
+                # 组装处理器配置（合并操作配置）
+                proc_config = {}
+                if config:
+                    proc_config = {
+                        'dry_run': True,
+                        'max_age_days': config.get('max_age_days', 30),
+                        'use_filename_date': config.get('use_filename_date', True),
+                        'target_extensions': config.get('target_extensions', []),
+                        'create_backup': config.get('safety_settings', {}).get('create_backup', True),
+                        'backup_dir': config.get('safety_settings', {}).get('backup_dir', 'backups'),
+                        'use_recycle_bin': config.get('safety_settings', {}).get('use_recycle_bin', True),
+                    }
+                
+                self.current_processor = self.factory.create_processor(mapped_type, proc_config)
                 self.current_processor_type = processor_type
+                
+                # 若为过期清理策略，应用年龄策略上下文
+                if config and config.get('cleaning_strategy') == 'age':
+                    context = cleaning_strategies.create_age_cleaning_context(
+                        max_age_days=config.get('max_age_days', 30),
+                        use_filename_date=config.get('use_filename_date', True),
+                        target_extensions=config.get('target_extensions') or None
+                    )
+                    self.current_processor.set_cleaning_context(context)
+                
                 return True
             return True
         except Exception as e:
@@ -621,31 +786,49 @@ class FileProcessorController:
     
     def _process_directory(self, target_dir, dry_run=True):
         """
-        处理目录
+        处理目录（真实执行清理）
+        
+        Args:
+            target_dir (str): 目标目录
+            dry_run (bool): 是否为预览模式
         """
         try:
             mode_text = "预览" if dry_run else "执行"
             print(f"🔄 {mode_text}模式处理目录: {target_dir}")
             
-            # 这里添加实际的处理逻辑
-            # 可以调用当前处理器的相关方法
-            if self.current_processor:
-                # 模拟处理过程
-                print(f"📁 扫描目录: {target_dir}")
-                print(f"🔍 应用策略: {getattr(self, 'current_strategy', 'unknown')}")
+            if not self.current_processor:
+                print("❌ 处理器未创建")
+                return False
+            
+            # 同步处理器 dry_run 配置，确保真实删除生效
+            self.current_processor.config['dry_run'] = dry_run
+            
+            # 调用真实处理逻辑
+            result = self.process_directory(target_dir, dry_run=dry_run)
+            
+            if result.get('success', False):
+                stats = result.get('stats', {})
+                print(f"✅ 扫描 {result.get('total_files_scanned', 0)} 个文件，"
+                      f"标记删除 {result.get('files_to_delete', 0)} 个")
+                print(f"   stats: 处理 {stats.get('files_processed', 0)} / "
+                      f"删除 {stats.get('files_deleted', 0)} / "
+                      f"释放 {stats.get('bytes_freed_formatted', '0B')}")
                 
-                if dry_run:
-                    print("💡 预览模式 - 未实际删除文件")
-                else:
-                    print("🗑️ 执行模式 - 实际删除文件")
+                # 展示将删除/已删除的文件明细
+                for f in result.get('processed_files', []):
+                    if f.get('should_delete'):
+                        status = "[预览] 将删除" if dry_run else "[已删]"
+                        print(f"   {status} {f.get('path')} ({f.get('size_formatted')}) - {f.get('reason')}")
                 
                 return True
             else:
-                print("❌ 处理器未创建")
+                print(f"❌ 处理失败: {result.get('error', '未知错误')}")
                 return False
-                
+            
         except Exception as e:
             print(f"❌ 处理目录失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _generate_report(self):

@@ -7,6 +7,7 @@
 
 import os
 import sys
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -389,25 +390,65 @@ class AgeBasedCleaningStrategy(CleaningStrategy):
     """
     基于文件年龄的清理策略
     清理超过指定时间的旧文件
+
+    支持两种过期判定方式（可同时开启）:
+    1. 按文件最后修改时间: 超过 max_age_days 天没改动即过期
+    2. 按文件名中的日期: 文件名包含日期（如 2024-01-15 报告.docx）时，
+       以该日期判定是否过期，适合导出文件等场景
     """
-    
-    def __init__(self, max_age_days: int = 30, target_extensions: Optional[List[str]] = None):
+
+    def __init__(self, max_age_days: int = 30,
+                 target_extensions: Optional[List[str]] = None,
+                 use_filename_date: bool = True,
+                 filename_date_patterns: Optional[List[str]] = None):
         super().__init__(
             name="旧文件清理策略",
             description=f"清理超过 {max_age_days} 天的指定类型文件"
         )
-        
+
         self.max_age_days = max_age_days
         self.cutoff_time = datetime.now() - timedelta(days=max_age_days)
-        
-        # 默认目标文件类型
+        self.use_filename_date = use_filename_date
+
+        # 文件名日期解析模式（按顺序尝试）
+        self.filename_date_patterns = filename_date_patterns or [
+            r'(\d{4})[-_./年](\d{1,2})[-_./月](\d{1,2})日?',   # 2024-01-15 / 2024_1_15 / 2024年1月15日
+            r'(\d{4})(\d{2})(\d{2})',                          # 20240115
+        ]
+
+        # 默认目标文件类型：文档 + 图片 + 临时文件全集
         if target_extensions is None:
-            self.target_extensions = {
-                '.log', '.tmp', '.bak', '.old', '.cache',
-                '.jpg', '.jpeg', '.png', '.gif', '.bmp'
-            }
+            self.target_extensions = (
+                set(file_types_config.DOCUMENT_EXTENSIONS)
+                | set(file_types_config.IMAGE_EXTENSIONS)
+                | set(file_types_config.TEMP_EXTENSIONS)
+            )
         else:
             self.target_extensions = set(ext.lower() for ext in target_extensions)
+
+    def parse_filename_date(self, file_path: str) -> Optional[datetime]:
+        """
+        从文件名中提取日期
+
+        支持格式: 2024-01-15、2024.1.15、2024/01/15、2024年1月15日、20240115
+
+        Args:
+            file_path (str): 文件路径
+
+        Returns:
+            Optional[datetime]: 解析出的日期，无法解析返回 None
+        """
+        file_name = Path(file_path).name
+        for pattern in self.filename_date_patterns:
+            match = re.search(pattern, file_name)
+            if match:
+                try:
+                    groups = match.groups()
+                    year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
+                    return datetime(year, month, day)
+                except (ValueError, IndexError):
+                    continue
+        return None
     
     def should_delete(self, file_path: str, file_info: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -428,23 +469,33 @@ class AgeBasedCleaningStrategy(CleaningStrategy):
         if extension not in self.target_extensions:
             return False, "文件类型不在清理范围内"
         
-        # 检查文件修改时间
+        # 获取文件日期：优先用文件名中的日期，失败则退回最后修改时间
+        file_time = None
+        source = "最后修改时间"
+        
+        if self.use_filename_date:
+            name_date = self.parse_filename_date(file_path)
+            if name_date is not None:
+                file_time = name_date
+                source = "文件名日期"
+        
         try:
-            mtime = file_info.get('modified_time')
-            if isinstance(mtime, str):
-                # 如果是ISO格式字符串，转换为datetime
-                file_time = datetime.fromisoformat(mtime.replace('Z', '+00:00'))
-            elif isinstance(mtime, (int, float)):
-                # 如果是时间戳
-                file_time = datetime.fromtimestamp(mtime)
-            else:
-                # 获取文件的修改时间
-                stat_info = os.stat(file_path)
-                file_time = datetime.fromtimestamp(stat_info.st_mtime)
+            if file_time is None:
+                mtime = file_info.get('modified_time')
+                if isinstance(mtime, str):
+                    # 如果是ISO格式字符串，转换为datetime
+                    file_time = datetime.fromisoformat(mtime.replace('Z', '+00:00'))
+                elif isinstance(mtime, (int, float)):
+                    # 如果是时间戳
+                    file_time = datetime.fromtimestamp(mtime)
+                else:
+                    # 获取文件的修改时间
+                    stat_info = os.stat(file_path)
+                    file_time = datetime.fromtimestamp(stat_info.st_mtime)
             
             if file_time < self.cutoff_time:
                 age_days = (datetime.now() - file_time).days
-                return True, f"旧文件 ({age_days} 天前, {extension})"
+                return True, f"旧文件 ({age_days} 天前, {source}, {extension})"
             
         except Exception as e:
             print(f"获取文件时间失败 {file_path}: {e}")
@@ -724,6 +775,33 @@ def create_percentage_cleaning_context() -> CleaningContext:
     context.add_strategy(SizeBasedCleaningStrategy(min_size_mb=10.0))
     context.add_strategy(AgeBasedCleaningStrategy(max_age_days=60))
     context.add_strategy(TemporaryFileCleaningStrategy())
+    return context
+
+
+def create_age_cleaning_context(max_age_days: int = 30,
+                                use_filename_date: bool = True,
+                                target_extensions: Optional[List[str]] = None) -> CleaningContext:
+    """
+    创建过期文件清理上下文
+    按文件年龄（最后修改时间或文件名日期）清理过期文件
+
+    Args:
+        max_age_days (int): 过期天数，超过该天数的文件会被清理
+        use_filename_date (bool): 是否优先使用文件名中的日期判定
+        target_extensions (Optional[List[str]]): 目标扩展名列表
+
+    Returns:
+        CleaningContext: 配置了过期文件清理策略的上下文
+    """
+    context = CleaningContext()
+    context.add_strategy(
+        AgeBasedCleaningStrategy(
+            max_age_days=max_age_days,
+            target_extensions=target_extensions,
+            use_filename_date=use_filename_date
+        )
+    )
+    context.set_strategy(context.strategies[0])
     return context
 
 

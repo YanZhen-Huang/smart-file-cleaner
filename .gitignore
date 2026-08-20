@@ -73,8 +73,13 @@ Thumbs.db
 *.log
 output/
 backup/
+backups/
+reports/
 temp/
 tmp/
+
+# 打包产物（安装器走 GitHub Releases 分发）
+setup/setup/
 
 # 排除扫描结果和清理报告
 scan_results*.json
