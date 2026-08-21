@@ -207,36 +207,41 @@ def _run_tray_mode() -> int:
             proc.wait(timeout=3600)
         except Exception as e:
             print(f"后台清理失败: {e}")
-    
+
+    def do_quit():
+        """托盘菜单退出"""
+        stop_event.set()
+        if icon:
+            icon.stop()
+
     # 定时调度
     if auto_clean.get("enabled", False):
         scheduler = AutoCleanScheduler(auto_clean.get("time", "02:00"), callback=do_clean)
         scheduler.start()
-    
+
     # 托盘图标
-    icon = create_tray_icon()
+    icon = create_tray_icon(on_clean=do_clean, on_quit=do_quit)
     tray_thread = run_tray_loop(icon)
-    
+
     if tray_thread is None:
         # 托盘不可用：只能靠调度，阻塞等待
-        print("⚠️ 托盘不可用，仅运行定时调度")
+        print("托盘不可用，仅运行定时调度")
         while not stop_event.is_set():
             stop_event.wait(1)
         return 0
-    
+
     # 等待托盘退出
     try:
-        if icon:
-            icon._thread = None
-        # 托盘线程退出即退出程序
-        if tray_thread:
-            tray_thread.join()
+        while not stop_event.is_set():
+            stop_event.wait(1)
     except KeyboardInterrupt:
         pass
-    
+
     if scheduler:
         scheduler.stop()
-    print("👋 后台模式退出")
+    if icon:
+        icon.stop()
+    print("后台模式退出")
     return 0
 
 if __name__ == "__main__":

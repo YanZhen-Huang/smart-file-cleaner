@@ -29,6 +29,7 @@ class AutoCleanScheduler:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
+        self._last_run_date = None
         self.callback = callback
         self._set_time(run_time)
 
@@ -56,9 +57,10 @@ class AutoCleanScheduler:
             if self._thread and self._thread.is_alive():
                 return
             self._stop_event.clear()
+            self._last_run_date = None  # 重启时重置日期，防止补跑遗漏
             self._thread = threading.Thread(target=self._loop, name="auto-clean-scheduler", daemon=True)
             self._thread.start()
-            print(f"✅ 定时调度已启动，每天 {self.run_time} 自动清理")
+            print(f"调度已启动，每天 {self.run_time} 自动清理")
 
     def stop(self):
         """停止调度线程"""
@@ -69,7 +71,6 @@ class AutoCleanScheduler:
 
     def _loop(self):
         """主循环：睡眠到下一个执行点，触发回调"""
-        last_run_date = None
         while not self._stop_event.is_set():
             now = datetime.now()
             with self._lock:
@@ -84,14 +85,17 @@ class AutoCleanScheduler:
                 break
 
             today = datetime.now().date()
-            if today != last_run_date:  # 防止补跑重复
-                last_run_date = today
+            with self._lock:
+                last = self._last_run_date
+            if today != last:
+                with self._lock:
+                    self._last_run_date = today
                 try:
                     if self.callback:
-                        print(f"⏰ 到达定时时间 {self.run_time}，触发自动清理")
+                        print(f"到达定时时间 {self.run_time}，触发自动清理")
                         self.callback()
                 except Exception as e:
-                    print(f"❌ 定时清理回调异常: {e}")
+                    print(f"定时清理回调异常: {e}")
 
 
 def is_valid_time(run_time: str) -> bool:
